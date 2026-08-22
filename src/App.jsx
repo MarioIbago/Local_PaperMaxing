@@ -1,42 +1,30 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { extractPdfText } from "./pdf";
-import {
-  generateWithGemini,
-  getGoogleProfile,
-  requestGoogleAccessToken,
-  testGeminiAccess,
-} from "./gemini";
 
-const STORAGE_KEY = "local-papermaxing-google-config";
-const DEFAULT_MODEL = "gemini-2.5-flash-lite";
-
-function loadConfig() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
-    return {
-      clientId: typeof saved.clientId === "string" ? saved.clientId : "",
-      projectId: typeof saved.projectId === "string" ? saved.projectId : "",
-      model: typeof saved.model === "string" ? saved.model : DEFAULT_MODEL,
-    };
-  } catch {
-    return { clientId: "", projectId: "", model: DEFAULT_MODEL };
-  }
-}
-
-function saveConfig(config) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+async function api(path, init = {}) {
+  const response = await fetch(path, {
+    ...init,
+    headers: {
+      ...(init.body ? { "Content-Type": "application/json" } : {}),
+      ...(init.headers || {}),
+    },
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
 }
 
 function analysisPrompt(title, text) {
-  return `You are PaperMaxing, a careful academic research assistant. Analyze ONLY the supplied paper text. Do not invent facts, citations, methods, results, sample sizes, or limitations. If something is not visible in the extracted text, say so clearly.
+  return `Analyze ONLY the supplied research-paper text. Do not invent facts, citations, methods, sample sizes, results, statistics, or limitations. When something is not visible in the extracted source, say so explicitly.
 
-Return the answer in Spanish with these exact sections:
+Return the answer in Spanish with exactly these sections:
 # Resumen
 # Pregunta de investigación
 # Metodología
 # Hallazgos principales
 # Limitaciones
-# Qué vale la pena revisar manualmente
+# Evidencia clave del texto
+# Qué revisar manualmente
 
 PAPER: ${title || "Untitled paper"}
 
@@ -45,7 +33,7 @@ ${text}`;
 }
 
 function questionPrompt(title, text, question) {
-  return `Answer the user's question using ONLY the supplied paper text. Be precise and conservative. If the answer is not supported by the text, say that it is not available in the extracted source. Answer in Spanish.
+  return `Answer the question using ONLY the supplied paper text. Be precise and conservative. If the source does not support the answer, say that clearly. Answer in Spanish.
 
 PAPER: ${title || "Untitled paper"}
 QUESTION: ${question}
@@ -54,73 +42,135 @@ EXTRACTED PAPER TEXT:
 ${text}`;
 }
 
+function providerReady(provider) {
+  if (!provider) return false;
+  if (provider.apiKeyMode === "required") return provider.hasApiKey;
+  return true;
+}
+
 export default function App() {
-  const initial = useMemo(loadConfig, []);
-  const [clientId, setClientId] = useState(initial.clientId);
-  const [projectId, setProjectId] = useState(initial.projectId);
-  const [model, setModel] = useState(initial.model);
-  const [accessToken, setAccessToken] = useState("");
-  const [profile, setProfile] = useState(null);
-  const [googleState, setGoogleState] = useState("idle");
-  const [googleMessage, setGoogleMessage] = useState("");
+  const [settings, setSettings] = useState(null);
+  const [selectedProvider, setSelectedProvider] = useState("ollama");
+  const [draft, setDraft] = useState({ model: "", baseUrl: "", apiKey: "" });
+  const [settingsState, setSettingsState] = useState("loading");
+  const [settingsMessage, setSettingsMessage] = useState("Cargando configuración local…");
+  const [testing, setTesting] = useState(false);
   const [paperName, setPaperName] = useState("");
   const [paperText, setPaperText] = useState("");
   const [paperMeta, setPaperMeta] = useState(null);
   const [extracting, setExtracting] = useState(false);
   const [analysis, setAnalysis] = useState("");
+  const [analysisMeta, setAnalysisMeta] = useState(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
   const [asking, setAsking] = useState(false);
 
-  const connected = Boolean(accessToken && profile);
-  const canUseGemini = connected && Boolean(projectId);
+  useEffect(() => {
+    api("/api/settings")
+      .then((value) => {
+        setSettings(value);
+        setSelectedProvider(value.selectedProvider);
+        const provider = value.providers[value.selectedProvider];
+        setDraft({ model: provider.model, baseUrl: provider.baseUrl, apiKey: "" });
+        setSettingsState("idle");
+        setSettingsMessage("Configuración cargada desde tu equipo.");
+      })
+      .catch((error) => {
+        setSettingsState("error");
+        setSettingsMessage(error instanceof Error ? error.message : "No se pudo conectar al backend local.");
+      });
+  }, []);
 
-  const connectGoogle = async () => {
-    const cleanClientId = clientId.trim();
-    const cleanProjectId = projectId.trim();
-    if (!cleanClientId || !cleanProjectId) {
-      setGoogleState("error");
-      setGoogleMessage("Agrega tu OAuth Client ID y tu Google Cloud Project ID primero.");
-      return;
+  const provider = settings?.providers?.[selectedProvider] || null;
+  const configured = providerReady(provider);
+  const providerList = useMemo(() => settings ? Object.values(settings.providers) : [], [settings]);
+
+  const chooseProvider = (id) => {
+    const next = settings?.providers?.[id];
+    if (!next) return;
+    setSelectedProvider(id);
+    setDraft({ model: next.model, baseUrl: next.baseUrl, apiKey: "" });
+    setSettingsState("idle");
+    setSettingsMessage(`${next.name} seleccionado. Guarda y prueba la conexión.`);
+  };
+
+  const saveCurrent = async ({ quiet = false } = {}) => {
+    if (!provider) throw new Error("No hay proveedor seleccionado.");
+    if (!draft.model.trim()) throw new Error("Escribe el ID del modelo.");
+    if (!draft.baseUrl.trim()) throw new Error("Escribe la URL del proveedor.");
+    if (!quiet) {
+      setSettingsState("saving");
+      setSettingsMessage("Guardando configuración en tu equipo…");
     }
+    const payload = {
+      selectedProvider,
+      providers: {
+        [selectedProvider]: {
+          model: draft.model.trim(),
+          baseUrl: draft.baseUrl.trim(),
+          ...(draft.apiKey.trim() ? { apiKey: draft.apiKey.trim() } : {}),
+        },
+      },
+    };
+    const value = await api("/api/settings", { method: "POST", body: JSON.stringify(payload) });
+    setSettings(value);
+    setDraft((current) => ({ ...current, apiKey: "" }));
+    if (!quiet) {
+      setSettingsState("ok");
+      setSettingsMessage(`Guardado localmente. ${value.providers[selectedProvider].name} es el proveedor activo.`);
+    }
+    return value;
+  };
 
-    saveConfig({ clientId: cleanClientId, projectId: cleanProjectId, model });
-    setGoogleState("loading");
-    setGoogleMessage("Abriendo Google y comprobando Gemini…");
-
+  const saveSettings = async () => {
     try {
-      const tokenResponse = await requestGoogleAccessToken(cleanClientId);
-      const token = tokenResponse.access_token;
-      const [user, models] = await Promise.all([
-        getGoogleProfile(token),
-        testGeminiAccess({ accessToken: token, projectId: cleanProjectId }),
-      ]);
-      setAccessToken(token);
-      setProfile(user);
-      setGoogleState("ok");
-      const freeModelVisible = models.some((item) => item?.name?.endsWith(`/${model}`));
-      setGoogleMessage(
-        freeModelVisible
-          ? `Gemini conectado. ${model} aparece disponible para este proyecto.`
-          : `Gemini conectado. El proyecto respondió correctamente; verifica que ${model} esté habilitado antes de analizar.`,
-      );
+      await saveCurrent();
     } catch (error) {
-      setAccessToken("");
-      setProfile(null);
-      setGoogleState("error");
-      setGoogleMessage(error instanceof Error ? error.message : "No se pudo conectar con Google/Gemini.");
+      setSettingsState("error");
+      setSettingsMessage(error instanceof Error ? error.message : "No se pudo guardar.");
     }
   };
 
-  const disconnectGoogle = () => {
-    if (accessToken && window.google?.accounts?.oauth2) {
-      window.google.accounts.oauth2.revoke(accessToken, () => {});
+  const testConnection = async () => {
+    setTesting(true);
+    setSettingsState("testing");
+    setSettingsMessage("Guardando y enviando una prueba real…");
+    try {
+      await saveCurrent({ quiet: true });
+      const result = await api("/api/providers/test", {
+        method: "POST",
+        body: JSON.stringify({ provider: selectedProvider, model: draft.model.trim() }),
+      });
+      setSettingsState("ok");
+      setSettingsMessage(`Conectado a ${result.providerName} · ${result.model} · ${result.latencyMs} ms`);
+    } catch (error) {
+      setSettingsState("error");
+      setSettingsMessage(error instanceof Error ? error.message : "La prueba del proveedor falló.");
+    } finally {
+      setTesting(false);
     }
-    setAccessToken("");
-    setProfile(null);
-    setGoogleState("idle");
-    setGoogleMessage("Sesión OAuth retirada del navegador.");
+  };
+
+  const clearApiKey = async () => {
+    if (!provider || provider.apiKeyMode === "none") return;
+    setSettingsState("saving");
+    try {
+      const value = await api("/api/settings", {
+        method: "POST",
+        body: JSON.stringify({
+          selectedProvider,
+          providers: { [selectedProvider]: { apiKey: "__CLEAR__", model: draft.model, baseUrl: draft.baseUrl } },
+        }),
+      });
+      setSettings(value);
+      setDraft((current) => ({ ...current, apiKey: "" }));
+      setSettingsState("ok");
+      setSettingsMessage("API key eliminada del archivo local.");
+    } catch (error) {
+      setSettingsState("error");
+      setSettingsMessage(error instanceof Error ? error.message : "No se pudo eliminar la clave.");
+    }
   };
 
   const onPdf = async (event) => {
@@ -143,19 +193,25 @@ export default function App() {
     }
   };
 
+  const runPrompt = async (prompt) => api("/api/chat", {
+    method: "POST",
+    body: JSON.stringify({
+      provider: selectedProvider,
+      model: provider?.model,
+      system: "You are PaperMaxing, a careful academic research assistant. Ground every claim in the supplied source text and never fabricate citations.",
+      prompt,
+    }),
+  });
+
   const analyze = async () => {
-    if (!canUseGemini || !paperText) return;
-    saveConfig({ clientId, projectId, model });
+    if (!paperText || !configured) return;
     setAnalyzing(true);
     setAnalysis("");
+    setAnalysisMeta(null);
     try {
-      const text = await generateWithGemini({
-        accessToken,
-        projectId: projectId.trim(),
-        model: model.trim() || DEFAULT_MODEL,
-        prompt: analysisPrompt(paperName, paperText),
-      });
-      setAnalysis(text);
+      const result = await runPrompt(analysisPrompt(paperName, paperText));
+      setAnalysis(result.text);
+      setAnalysisMeta(result);
     } catch (error) {
       setAnalysis(`ERROR: ${error instanceof Error ? error.message : "No se pudo analizar el paper."}`);
     } finally {
@@ -165,17 +221,12 @@ export default function App() {
 
   const ask = async () => {
     const cleanQuestion = question.trim();
-    if (!canUseGemini || !paperText || !cleanQuestion) return;
+    if (!paperText || !cleanQuestion || !configured) return;
     setAsking(true);
     setAnswer("");
     try {
-      const text = await generateWithGemini({
-        accessToken,
-        projectId: projectId.trim(),
-        model: model.trim() || DEFAULT_MODEL,
-        prompt: questionPrompt(paperName, paperText, cleanQuestion),
-      });
-      setAnswer(text);
+      const result = await runPrompt(questionPrompt(paperName, paperText, cleanQuestion));
+      setAnswer(result.text);
     } catch (error) {
       setAnswer(`ERROR: ${error instanceof Error ? error.message : "No se pudo responder."}`);
     } finally {
@@ -188,84 +239,77 @@ export default function App() {
       <header className="topbar">
         <a className="brand" href="#top" aria-label="Local PaperMaxing">PAPER<span>MAXING</span><small>LOCAL</small></a>
         <div className="topbar-actions">
-          <span className={`status-dot ${connected ? "online" : ""}`} />
-          <span>{connected ? "Google + Gemini conectados" : "Local-first"}</span>
+          <span className={`status-dot ${settingsState === "ok" || configured ? "online" : ""}`} />
+          <span>{provider ? `${provider.name} · ${provider.kind}` : "Backend local"}</span>
         </div>
       </header>
 
       <main id="top">
         <section className="hero">
           <div className="hero-copy">
-            <h1>Tus papers.<br />Tu cuenta.<br /><em>Tu cuota.</em></h1>
+            <h1>Todo local.<br />Elige el<br /><em>cerebro.</em></h1>
             <p>
-              Una prueba de PaperMaxing sin Python, sin NotebookLM y sin una API key pegada en la app.
-              El PDF se lee en tu navegador y Gemini se autoriza con Google OAuth.
+              PaperMaxing corre en tu computadora. El PDF se extrae en el navegador, las claves se guardan solo en tu disco y un backend Node local conecta el proveedor que tú elijas.
             </p>
           </div>
           <div className="principle-card">
-            <span>Arquitectura</span>
-            <pre>{`PDF local\n   ↓\nGoogle OAuth\n   ↓\nGemini API\n   ↓\nPaperMaxing`}</pre>
+            <span>Arquitectura local</span>
+            <pre>{`PDF → navegador\n        ↓\n127.0.0.1:8787\n        ↓\n${provider?.name || "tu proveedor"}`}</pre>
           </div>
         </section>
 
         <section className="workspace-grid">
           <aside className="setup-panel panel">
             <div className="section-number">01</div>
-            <h2>Conectar Google</h2>
-            <p className="muted">
-              Para esta prueba local, usa un proyecto de Google Cloud que pertenezca a la misma cuenta con la que iniciarás sesión.
-            </p>
+            <h2>Proveedor</h2>
+            <p className="muted">Configúralo una vez. Los secretos nunca se devuelven al navegador después de guardarlos.</p>
 
             <label>
-              <span>OAuth Web Client ID</span>
-              <input
-                value={clientId}
-                onChange={(event) => setClientId(event.target.value)}
-                placeholder="123456789-...apps.googleusercontent.com"
-                autoComplete="off"
-              />
-            </label>
-
-            <label>
-              <span>Google Cloud Project ID</span>
-              <input
-                value={projectId}
-                onChange={(event) => setProjectId(event.target.value)}
-                placeholder="my-gemini-project"
-                autoComplete="off"
-              />
-            </label>
-
-            <label>
-              <span>Modelo</span>
-              <select value={model} onChange={(event) => setModel(event.target.value)}>
-                <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash-Lite — Free Tier</option>
-                <option value="gemini-2.5-flash">Gemini 2.5 Flash — Free Tier</option>
+              <span>Provider</span>
+              <select value={selectedProvider} onChange={(event) => chooseProvider(event.target.value)} disabled={!settings}>
+                {providerList.map((item) => <option value={item.id} key={item.id}>{item.name} · {item.kind}</option>)}
               </select>
             </label>
 
-            {!connected ? (
-              <button className="primary-button" type="button" onClick={connectGoogle} disabled={googleState === "loading"}>
-                {googleState === "loading" ? "Conectando…" : "Continuar con Google"}
-              </button>
-            ) : (
-              <div className="account-row">
-                {profile?.picture ? <img src={profile.picture} alt="" referrerPolicy="no-referrer" /> : null}
-                <div><strong>{profile?.name || "Google user"}</strong><small>{profile?.email || "OAuth activo"}</small></div>
-                <button type="button" onClick={disconnectGoogle}>Salir</button>
-              </div>
-            )}
+            {provider ? <p className="provider-description">{provider.description}</p> : null}
 
-            {googleMessage ? <div className={`notice ${googleState}`}>{googleMessage}</div> : null}
+            <label>
+              <span>Model ID</span>
+              <input value={draft.model} onChange={(event) => setDraft((current) => ({ ...current, model: event.target.value }))} placeholder={provider?.defaultModel || "model"} />
+            </label>
+
+            <label>
+              <span>Base URL</span>
+              <input value={draft.baseUrl} onChange={(event) => setDraft((current) => ({ ...current, baseUrl: event.target.value }))} placeholder={provider?.defaultBaseUrl || "http://127.0.0.1"} />
+            </label>
+
+            {provider && provider.apiKeyMode !== "none" ? (
+              <label>
+                <span>API key {provider.apiKeyMode === "optional" ? "(opcional)" : ""}</span>
+                <input
+                  type="password"
+                  value={draft.apiKey}
+                  onChange={(event) => setDraft((current) => ({ ...current, apiKey: event.target.value }))}
+                  placeholder={provider.hasApiKey ? "Ya hay una clave guardada · escribe otra para reemplazarla" : "Pega tu clave"}
+                  autoComplete="off"
+                />
+              </label>
+            ) : null}
+
+            <div className="button-row">
+              <button className="primary-button" type="button" onClick={saveSettings} disabled={!provider || settingsState === "saving"}>Guardar</button>
+              <button className="secondary-button" type="button" onClick={testConnection} disabled={!provider || testing}>{testing ? "Probando…" : "Probar conexión"}</button>
+            </div>
+
+            {provider?.hasApiKey ? <button className="text-button" type="button" onClick={clearApiKey}>Eliminar API key guardada</button> : null}
+            <div className={`notice ${settingsState}`}>{settingsMessage}</div>
 
             <div className="setup-notes">
-              <strong>Antes del primer login</strong>
-              <ol>
-                <li>Habilita Generative Language API en tu proyecto.</li>
-                <li>Crea un OAuth Client de tipo Web.</li>
-                <li>Agrega <code>http://localhost:5173</code> como Authorized JavaScript origin.</li>
-                <li>Tu cuenta debe poder consumir cuota de ese proyecto.</li>
-              </ol>
+              <strong>Opciones sin costo por API</strong>
+              <p><b>Ollama:</b> instala un modelo local, por ejemplo <code>ollama pull gemma3:4b</code>.</p>
+              <p><b>LM Studio:</b> carga un modelo y activa Local Server.</p>
+              <p><b>Gemini:</b> puedes usar la cuota Free Tier de tu propia clave/proyecto.</p>
+              {settings?.configPath ? <p className="config-path">Config: <code>{settings.configPath}</code></p> : null}
             </div>
           </aside>
 
@@ -280,13 +324,12 @@ export default function App() {
 
             {paperMeta ? (
               <div className="paper-meta">
-                {paperMeta.error ? (
-                  <span>{paperMeta.error}</span>
-                ) : (
+                {paperMeta.error ? <span>{paperMeta.error}</span> : (
                   <>
                     <span><b>{paperMeta.totalPages}</b> páginas</span>
-                    <span><b>{paperText.length.toLocaleString()}</b> caracteres extraídos</span>
-                    {paperMeta.truncated ? <span>Texto limitado para la prueba</span> : null}
+                    <span><b>{paperMeta.pagesRead}</b> leídas</span>
+                    <span><b>{paperText.length.toLocaleString()}</b> caracteres</span>
+                    {paperMeta.truncated ? <span>Texto truncado al límite local</span> : null}
                   </>
                 )}
               </div>
@@ -299,22 +342,23 @@ export default function App() {
                 setPaperText(event.target.value);
                 if (!paperName) setPaperName("Texto pegado");
               }}
-              placeholder="También puedes pegar aquí el texto de un paper para probar sin PDF."
+              placeholder="También puedes pegar aquí el texto de un paper."
             />
 
-            <button className="primary-button" type="button" onClick={analyze} disabled={!canUseGemini || !paperText || analyzing}>
-              {analyzing ? "Analizando con Gemini…" : "Analizar paper"}
+            <button className="primary-button" type="button" onClick={analyze} disabled={!configured || !paperText || analyzing}>
+              {analyzing ? `Analizando con ${provider?.name || "provider"}…` : "Analizar paper"}
             </button>
+            {!configured ? <p className="inline-warning">Configura la API key del proveedor seleccionado antes de analizar.</p> : null}
           </section>
         </section>
 
         <section className="results panel">
           <div className="results-heading">
-            <div><div className="section-number">03</div><h2>Resultado</h2></div>
-            <span>{model}</span>
+            <div><div className="section-number">03</div><h2>Análisis</h2></div>
+            <span>{analysisMeta ? `${analysisMeta.providerName} · ${analysisMeta.model}` : `${provider?.name || "provider"} · ${provider?.model || draft.model}`}</span>
           </div>
           <div className="result-body">
-            {analysis ? <pre>{analysis}</pre> : <p className="empty-state">Conecta Google, carga un paper y ejecuta el análisis.</p>}
+            {analysis ? <pre>{analysis}</pre> : <p className="empty-state">Configura un proveedor, carga un paper y ejecuta el análisis.</p>}
           </div>
         </section>
 
@@ -325,29 +369,22 @@ export default function App() {
             <input
               value={question}
               onChange={(event) => setQuestion(event.target.value)}
-              onKeyDown={(event) => { if (event.key === "Enter") ask(); }}
+              onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) ask(); }}
               placeholder="¿Cuál es la metodología? ¿Qué limitaciones reporta?"
             />
-            <button type="button" onClick={ask} disabled={!canUseGemini || !paperText || !question.trim() || asking}>
-              {asking ? "Pensando…" : "Preguntar"}
-            </button>
+            <button type="button" onClick={ask} disabled={!configured || !paperText || !question.trim() || asking}>{asking ? "Pensando…" : "Preguntar"}</button>
           </div>
           {answer ? <pre className="answer">{answer}</pre> : null}
         </section>
 
         <section className="truth-panel">
-          <h2>Qué significa “gratis” aquí</h2>
-          <p>
-            PaperMaxing no paga una API central por todos. La prueba intenta usar el proyecto de Google Cloud del propio usuario.
-            Gemini 2.5 Flash y Flash-Lite tienen Free Tier con límites; si el proyecto deja el Free Tier o alcanza sus límites, Google puede rechazar solicitudes.
-          </p>
-          <p>
-            En el Free Tier, Google indica que el contenido puede usarse para mejorar sus productos. No uses esta prueba con documentos que no debas enviar a Gemini.
-          </p>
+          <h2>Local significa local</h2>
+          <p><b>PDF:</b> se lee en tu navegador y no se sube a PaperMaxing. Solo el texto necesario se envía al proveedor cuando haces una consulta.</p>
+          <p><b>Con Ollama/LM Studio:</b> incluso la inferencia puede quedarse en tu computadora. Con proveedores cloud, el texto sí sale hacia ese proveedor.</p>
         </section>
       </main>
 
-      <footer>Local PaperMaxing · OAuth experiment · no Python required</footer>
+      <footer>Local PaperMaxing · Node + React · no Python · no Vercel</footer>
     </div>
   );
 }
