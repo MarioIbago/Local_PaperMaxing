@@ -24,6 +24,6 @@ if not exist node_modules (
 
 echo.
 echo [PaperMaxing] Starting local UI + local API...
-echo [PaperMaxing] Open http://127.0.0.1:5173
-start "" http://127.0.0.1:5173
+echo [PaperMaxing] URL: http://127.0.0.1:5173
+start "PaperMaxing Browser" cmd /c "timeout /t 3 /nobreak >nul && start \"\" http://127.0.0.1:5173"
 call npm run dev
