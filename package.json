@@ -1,14 +1,22 @@
 {
   "name": "local-papermaxing",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
-    "dev": "vite --host 0.0.0.0",
+    "dev": "concurrently -k -n API,WEB \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "node --watch server/index.mjs",
+    "dev:web": "vite --host 127.0.0.1 --port 5173",
     "build": "vite build",
-    "preview": "vite preview --host 0.0.0.0"
+    "start": "node server/index.mjs",
+    "doctor": "node server/doctor.mjs"
   },
   "dependencies": {
+    "concurrently": "^9.2.1",
+    "express": "^5.1.0",
     "pdfjs-dist": "^6.2.108",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
