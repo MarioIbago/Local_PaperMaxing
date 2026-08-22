@@ -11,6 +11,7 @@
     "dev:api": "node --watch server/index.mjs",
     "dev:web": "vite --host 127.0.0.1 --port 5173",
     "build": "vite build",
+    "check": "node --check server/index.mjs && node --check server/doctor.mjs && npm run build",
     "start": "node server/index.mjs",
     "doctor": "node server/doctor.mjs"
   },
