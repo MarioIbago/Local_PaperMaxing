@@ -16,6 +16,7 @@
     "doctor": "node server/doctor.mjs"
   },
   "dependencies": {
+    "@vitejs/plugin-react": "^5.0.2",
     "concurrently": "^9.2.1",
     "express": "^5.1.0",
     "pdfjs-dist": "^6.2.108",
