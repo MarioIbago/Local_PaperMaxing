@@ -1,53 +1,12 @@
 # Local PaperMaxing
 
-Local-first experimental PaperMaxing client that tests **Google OAuth + Gemini Developer API Free Tier** without Python, NotebookLM, Docker, or a Gemini API key pasted into the app.
+**PaperMaxing that runs on your own computer.** No Vercel, no Python, no NotebookLM gateway, no database, and no PaperMaxing cloud backend.
 
-## What this prototype does
+The app is a React/Vite frontend plus a tiny local Node.js gateway. PDFs are parsed in the browser with PDF.js. You choose the LLM provider from Settings and the local gateway calls it.
 
-1. The user enters their own Google Cloud **Project ID** and OAuth **Web Client ID**.
-2. The browser opens the official Google OAuth account picker.
-3. Google returns a short-lived OAuth access token to the browser.
-4. Local PaperMaxing sends that token to the official Gemini Developer API together with the user's quota project.
-5. PDFs are parsed locally in the browser with PDF.js.
-6. Only extracted paper text is sent to Gemini when the user explicitly asks for analysis or asks a question.
+## Install once
 
-The OAuth access token is kept only in React memory. It is not written to localStorage or committed to GitHub. The Client ID, Project ID, and selected model can be saved in localStorage because those values are configuration, not bearer credentials.
-
-## Important limitation: Google Sign-In does not create free Gemini quota by itself
-
-Gemini OAuth requests still need a **quota project**. For this local experiment, the person signing in should use a Google Cloud project they own or a project where they have permission to consume services (`serviceusage.services.use`). The Free Tier belongs to that project.
-
-This makes the design useful for Local PaperMaxing: each technical user can bring their own Google project and use that project's Free Tier without sharing a central PaperMaxing API key.
-
-It is **not** yet a zero-setup public-login system where any random Google account automatically brings personal Gemini API quota. A public SaaS would need a different quota/billing architecture or an onboarding flow that provisions/links projects.
-
-## Free models used by the UI
-
-- `gemini-2.5-flash-lite`
-- `gemini-2.5-flash`
-
-Google currently lists both with Free Tier input/output subject to rate limits. Free-tier prompts may be used by Google to improve products; do not use confidential material unless that is acceptable for your use case.
-
-## One-time Google Cloud setup
-
-Use the same Google account that will sign in to Local PaperMaxing.
-
-1. Create or choose a Google Cloud project.
-2. Enable **Generative Language API** (`generativelanguage.googleapis.com`).
-3. Open **Google Auth Platform** and configure an OAuth consent screen.
-4. For a private test, add your Google account as a test user if required.
-5. Create an OAuth 2.0 Client ID with application type **Web application**.
-6. Add this Authorized JavaScript origin:
-
-```text
-http://localhost:5173
-```
-
-7. Copy the OAuth Client ID and the Google Cloud Project ID.
-
-For OAuth requests that use the project for quota, the signed-in account must have permission to consume services from that project. Project owners normally already have the required permission.
-
-## Run locally
+Requirements: Node.js 22+.
 
 ```bash
 git clone https://github.com/MarioIbago/Local_PaperMaxing.git
@@ -59,48 +18,151 @@ npm run dev
 Open:
 
 ```text
-http://localhost:5173
+http://127.0.0.1:5173
 ```
 
-Then:
-
-1. Paste the OAuth Web Client ID.
-2. Paste the Project ID.
-3. Click **Continuar con Google**.
-4. Choose the account that owns/has access to the project.
-5. Load a PDF or paste paper text.
-6. Click **Analizar paper** or ask a question.
-
-## Request path
+That single `npm run dev` starts both:
 
 ```text
-PDF
-  ↓ (PDF.js, local browser only)
+React / Vite UI        http://127.0.0.1:5173
+Local Node API         http://127.0.0.1:8787
+```
+
+Vite proxies `/api/*` to the local Node process, so the browser never talks directly to cloud provider APIs.
+
+## Providers
+
+The UI currently supports:
+
+| Provider | Default endpoint | API key |
+| --- | --- | --- |
+| Ollama | `http://127.0.0.1:11434` | No |
+| LM Studio | `http://127.0.0.1:1234/v1` | Optional |
+| OpenAI-compatible | configurable | Optional |
+| Google Gemini | Gemini Developer API | Yes |
+| OpenRouter | OpenRouter API | Yes |
+| OpenAI | OpenAI API | Yes |
+| Anthropic Claude | Anthropic API | Yes |
+
+Model IDs and base URLs are editable. Nothing is hard-wired to one provider.
+
+## Fully local / free path
+
+For the most local setup, use Ollama or LM Studio.
+
+### Ollama example
+
+Install Ollama, then download a model once:
+
+```bash
+ollama pull gemma3:4b
+```
+
+Start Ollama normally. In PaperMaxing choose:
+
+```text
+Provider: Ollama
+Model: gemma3:4b
+Base URL: http://127.0.0.1:11434
+```
+
+Press **Save** and **Test connection**.
+
+After the model has been downloaded, the PaperMaxing app, PDF extraction, local gateway, prompt, and model inference can all stay on your machine.
+
+### LM Studio example
+
+1. Download a model in LM Studio.
+2. Start **Local Server**.
+3. In PaperMaxing select **LM Studio**.
+4. Use the model ID exposed by LM Studio.
+5. Save and test.
+
+## Cloud/free-tier providers
+
+You can also configure Gemini, OpenRouter, OpenAI or Claude. Their API keys are entered in the local UI and sent only to the local Node gateway.
+
+Gemini can be useful with a Google project/API key that has Free Tier quota. Free-tier availability and limits are controlled by Google, not by PaperMaxing.
+
+## Where secrets are stored
+
+Provider configuration is written locally to:
+
+```text
+.papermaxing/config.json
+```
+
+That directory is included in `.gitignore` and is never meant to be committed.
+
+The settings endpoint deliberately does **not** send stored API keys back to the browser. It only returns whether a key exists.
+
+On POSIX systems the gateway attempts to save the file with mode `0600`. On Windows, filesystem permissions follow Windows ACL behavior.
+
+## What stays local
+
+```text
+PDF file
+   ↓
+PDF.js in browser
+   ↓
 extracted text
-  ↓
-Google OAuth access token
-  ↓
-Gemini Developer API
-  ↓
-Local PaperMaxing result
+   ↓
+127.0.0.1:8787 local Node gateway
+   ↓
+selected provider
 ```
 
-No Python process and no NotebookLM gateway are required.
+- The original PDF is not uploaded to a PaperMaxing server.
+- There is no PaperMaxing account or central database.
+- Provider settings live on your computer.
+- With Ollama/LM Studio, inference can also remain local.
+- With Gemini/OpenRouter/OpenAI/Claude, the relevant extracted text leaves your computer and is sent to that provider when you request analysis/chat.
 
-## OAuth scopes used
+## Paper workflow
 
-The experiment asks for:
+1. Choose/configure a provider.
+2. Press **Test connection**. This performs a real model request.
+3. Load a PDF or paste extracted paper text.
+4. Press **Analyze paper**.
+5. Ask follow-up questions grounded in the extracted paper text.
+
+The current extraction cap is enforced client-side so accidental giant requests are avoided.
+
+## Diagnostics
+
+While the app is running:
+
+```bash
+npm run doctor
+```
+
+This checks common local endpoints for Ollama, LM Studio and the PaperMaxing API.
+
+You can also inspect:
 
 ```text
-openid
-email
-profile
-https://www.googleapis.com/auth/cloud-platform
-https://www.googleapis.com/auth/generative-language.retriever
+http://127.0.0.1:8787/api/health
 ```
 
-Google's Gemini OAuth documentation demonstrates user OAuth credentials with Generative Language API enabled and a quota project sent through `x-goog-user-project`.
+## Production-style local run
 
-## Why this repo exists separately
+Build the frontend:
 
-`Local_PaperMaxing` is intentionally isolated from the main `PaperMaxing` repository so OAuth/Gemini experiments can be validated without breaking the NotebookLM/OpenRouter implementation in the primary project.
+```bash
+npm run build
+npm start
+```
+
+The Node gateway will serve the built `dist/` app and its API locally. The development command remains the easiest way to work on the project.
+
+## Why there is no Python
+
+The local gateway is written entirely in Node.js and uses Node's built-in `fetch`. PDF extraction is done by PDF.js in the browser. No Python environment, Docker container or NotebookLM session is required.
+
+## Security boundary
+
+This project is intentionally local-first, not a public multi-user server. Do not expose port `8787` directly to the internet: it can use the provider credentials stored on the machine.
+
+## Repository split
+
+`Local_PaperMaxing` is the local-first implementation. The main `PaperMaxing` repository can continue experimenting with hosted/NotebookLM workflows without making this local version depend on them.
