@@ -1,168 +1,132 @@
 # Local PaperMaxing
 
-**PaperMaxing that runs on your own computer.** No Vercel, no Python, no NotebookLM gateway, no database, and no PaperMaxing cloud backend.
+PaperMaxing local con **NotebookLM sin Docker**.
 
-The app is a React/Vite frontend plus a tiny local Node.js gateway. PDFs are parsed in the browser with PDF.js. You choose the LLM provider from Settings and the local gateway calls it.
+Esta versión usa un frontend React/Vite, una API local Node.js y el runtime de `notebooklm-py` que tú colocas como `notebook-llm.zip`. PaperMaxing no hace `pip install`, no crea contenedores y no descarga Chromium para el login: usa Google Chrome instalado en Windows.
 
-## Install once
+## Inicio rápido en Windows
 
-Requirements: Node.js 22+.
+Requisitos:
+
+- Node.js 22+
+- Google Chrome
+- El archivo `notebook-llm.zip` junto a `start-local.bat`
+
+Estructura:
+
+```text
+Local_PaperMaxing/
+├─ notebook-llm.zip
+├─ start-local.bat
+├─ server/
+└─ src/
+```
+
+Después haz doble clic en:
+
+```text
+start-local.bat
+```
+
+En el primer inicio PaperMaxing:
+
+1. instala las dependencias de la interfaz con npm si todavía no existen;
+2. extrae `notebook-llm.zip` dentro de `.papermaxing/runtime/`;
+3. reutiliza el `notebooklm-py 0.8.1` contenido en ese ZIP;
+4. valida la sesión de Google;
+5. si hace falta login, abre tu Chrome instalado (no descarga Chromium);
+6. levanta NotebookLM en `127.0.0.1:8100`;
+7. levanta la API de PaperMaxing en `127.0.0.1:8787`;
+8. levanta la interfaz en `127.0.0.1:5173`.
+
+## Comandos
 
 ```bash
-git clone https://github.com/MarioIbago/Local_PaperMaxing.git
-cd Local_PaperMaxing
-npm install
-npm run dev
+npm run notebooklm:prepare
+npm run notebooklm:auth
+npm run notebooklm:check
+npm run notebooklm:server
+npm run notebooklm:probe
+npm run dev:notebooklm
 ```
 
-Open:
+### Rehacer el login
+
+```bash
+npm run notebooklm:login
+```
+
+El login usa:
 
 ```text
-http://127.0.0.1:5173
+notebooklm -p papermaxing login --browser chrome
 ```
 
-That single `npm run dev` starts both:
+Por eso no necesita descargar el Chromium de Playwright.
+
+## Dónde se guarda todo
+
+Todo lo sensible/local queda bajo:
 
 ```text
-React / Vite UI        http://127.0.0.1:5173
-Local Node API         http://127.0.0.1:8787
+.papermaxing/
+├─ config.json
+├─ notebooklm-server-token.txt
+├─ notebooklm/
+│  └─ profiles/papermaxing/storage_state.json
+└─ runtime/
+   └─ notebook-llm/.venv/...
 ```
 
-Vite proxies `/api/*` to the local Node process, so the browser never talks directly to cloud provider APIs.
+`.papermaxing/` y `notebook-llm.zip` están ignorados por Git para evitar subir credenciales o el runtime binario.
+
+## Cómo funciona NotebookLM dentro de PaperMaxing
+
+```text
+PDF
+ ↓
+PDF.js (browser)
+ ↓
+texto extraído
+ ↓
+PaperMaxing API 127.0.0.1:8787
+ ↓
+NotebookLM REST 127.0.0.1:8100
+ ↓
+sesión local de Google
+ ↓
+NotebookLM
+```
+
+Al analizar un paper con el provider **NotebookLM**, PaperMaxing crea un notebook temporal, añade el texto extraído como fuente, espera a que la fuente esté lista, realiza la pregunta grounded y elimina el notebook temporal al terminar.
 
 ## Providers
 
-The UI currently supports:
+- NotebookLM — sesión local de Google, sin API key y sin Docker.
+- Ollama — local.
+- LM Studio — local.
+- OpenAI-compatible — local o remoto.
+- Gemini — API.
+- OpenRouter — API.
+- OpenAI — API.
+- Anthropic — API.
 
-| Provider | Default endpoint | API key |
-| --- | --- | --- |
-| Ollama | `http://127.0.0.1:11434` | No |
-| LM Studio | `http://127.0.0.1:1234/v1` | Optional |
-| OpenAI-compatible | configurable | Optional |
-| Google Gemini | Gemini Developer API | Yes |
-| OpenRouter | OpenRouter API | Yes |
-| OpenAI | OpenAI API | Yes |
-| Anthropic Claude | Anthropic API | Yes |
+NotebookLM es el provider predeterminado para instalaciones nuevas.
 
-Model IDs and base URLs are editable. Nothing is hard-wired to one provider.
+## Diagnóstico
 
-## Fully local / free path
-
-For the most local setup, use Ollama or LM Studio.
-
-### Ollama example
-
-Install Ollama, then download a model once:
-
-```bash
-ollama pull gemma3:4b
-```
-
-Start Ollama normally. In PaperMaxing choose:
-
-```text
-Provider: Ollama
-Model: gemma3:4b
-Base URL: http://127.0.0.1:11434
-```
-
-Press **Save** and **Test connection**.
-
-After the model has been downloaded, the PaperMaxing app, PDF extraction, local gateway, prompt, and model inference can all stay on your machine.
-
-### LM Studio example
-
-1. Download a model in LM Studio.
-2. Start **Local Server**.
-3. In PaperMaxing select **LM Studio**.
-4. Use the model ID exposed by LM Studio.
-5. Save and test.
-
-## Cloud/free-tier providers
-
-You can also configure Gemini, OpenRouter, OpenAI or Claude. Their API keys are entered in the local UI and sent only to the local Node gateway.
-
-Gemini can be useful with a Google project/API key that has Free Tier quota. Free-tier availability and limits are controlled by Google, not by PaperMaxing.
-
-## Where secrets are stored
-
-Provider configuration is written locally to:
-
-```text
-.papermaxing/config.json
-```
-
-That directory is included in `.gitignore` and is never meant to be committed.
-
-The settings endpoint deliberately does **not** send stored API keys back to the browser. It only returns whether a key exists.
-
-On POSIX systems the gateway attempts to save the file with mode `0600`. On Windows, filesystem permissions follow Windows ACL behavior.
-
-## What stays local
-
-```text
-PDF file
-   ↓
-PDF.js in browser
-   ↓
-extracted text
-   ↓
-127.0.0.1:8787 local Node gateway
-   ↓
-selected provider
-```
-
-- The original PDF is not uploaded to a PaperMaxing server.
-- There is no PaperMaxing account or central database.
-- Provider settings live on your computer.
-- With Ollama/LM Studio, inference can also remain local.
-- With Gemini/OpenRouter/OpenAI/Claude, the relevant extracted text leaves your computer and is sent to that provider when you request analysis/chat.
-
-## Paper workflow
-
-1. Choose/configure a provider.
-2. Press **Test connection**. This performs a real model request.
-3. Load a PDF or paste extracted paper text.
-4. Press **Analyze paper**.
-5. Ask follow-up questions grounded in the extracted paper text.
-
-The current extraction cap is enforced client-side so accidental giant requests are avoided.
-
-## Diagnostics
-
-While the app is running:
+Con PaperMaxing corriendo:
 
 ```bash
 npm run doctor
 ```
 
-This checks common local endpoints for Ollama, LM Studio and the PaperMaxing API.
-
-You can also inspect:
-
-```text
-http://127.0.0.1:8787/api/health
-```
-
-## Production-style local run
-
-Build the frontend:
+Para comprobar específicamente NotebookLM:
 
 ```bash
-npm run build
-npm start
+npm run notebooklm:probe
 ```
 
-The Node gateway will serve the built `dist/` app and its API locally. The development command remains the easiest way to work on the project.
+## Nota sobre el ZIP
 
-## Why there is no Python
-
-The local gateway is written entirely in Node.js and uses Node's built-in `fetch`. PDF extraction is done by PDF.js in the browser. No Python environment, Docker container or NotebookLM session is required.
-
-## Security boundary
-
-This project is intentionally local-first, not a public multi-user server. Do not expose port `8787` directly to the internet: it can use the provider credentials stored on the machine.
-
-## Repository split
-
-`Local_PaperMaxing` is the local-first implementation. The main `PaperMaxing` repository can continue experimenting with hosted/NotebookLM workflows without making this local version depend on them.
+El ZIP incluido fue creado como un entorno Python 3.12 de Windows. PaperMaxing intenta reutilizarlo tal cual y reparar automáticamente `pyvenv.cfg` si la ruta original de Python cambió, siempre sin descargar paquetes. Si en esa computadora no existe Python 3.12 compatible, el launcher lo indicará en lugar de hacer descargas silenciosas.
