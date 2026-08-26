@@ -76,7 +76,7 @@ export async function ensureNotebookLMRuntime() {
     throw new Error("El notebook-llm.zip incluido es un runtime de Windows (Python 3.12 win_amd64). Usa Local PaperMaxing en Windows para este bundle.");
   }
 
-  if (!(await exists(NOTEBOOKLM_SERVER))) {
+  if (!(await exists(NOTEBOOKLM_PYTHON))) {
     if (!(await exists(NOTEBOOKLM_ZIP))) {
       throw new Error(`No encuentro ${NOTEBOOKLM_ZIP}. Copia notebook-llm.zip a la raíz de Local_PaperMaxing.`);
     }
@@ -84,7 +84,7 @@ export async function ensureNotebookLMRuntime() {
     console.log("[NotebookLM] Extrayendo el runtime local incluido (sin descargar nada)...");
     const script = `Expand-Archive -LiteralPath ${powershellQuote(NOTEBOOKLM_ZIP)} -DestinationPath ${powershellQuote(NOTEBOOKLM_RUNTIME_ROOT)} -Force`;
     const extracted = runSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], { stdio: "inherit" });
-    if (extracted.status !== 0 || !(await exists(NOTEBOOKLM_SERVER))) {
+    if (extracted.status !== 0 || !(await exists(NOTEBOOKLM_PYTHON))) {
       throw new Error("No se pudo extraer notebook-llm.zip con PowerShell.");
     }
   }
@@ -93,6 +93,7 @@ export async function ensureNotebookLMRuntime() {
   return {
     cli: NOTEBOOKLM_CLI,
     server: NOTEBOOKLM_SERVER,
+    python: NOTEBOOKLM_PYTHON,
     home: NOTEBOOKLM_HOME,
     profile: NOTEBOOKLM_PROFILE,
   };
@@ -128,7 +129,7 @@ export async function notebookLMEnvironment() {
 async function authCheck({ quiet = false } = {}) {
   await ensureNotebookLMRuntime();
   const env = await notebookLMEnvironment();
-  const result = runSync(NOTEBOOKLM_CLI, ["-p", NOTEBOOKLM_PROFILE, "auth", "check", "--test", "--json"], {
+  const result = runSync(NOTEBOOKLM_PYTHON, ["-m", "notebooklm", "-p", NOTEBOOKLM_PROFILE, "auth", "check", "--test", "--json"], {
     env,
     stdio: quiet ? "pipe" : "inherit",
   });
@@ -143,8 +144,8 @@ export async function ensureNotebookLMAuth({ interactive = true } = {}) {
   console.log("[NotebookLM] Abriré Google en tu Chrome instalado. No se descargará Chromium.\n");
   const env = await notebookLMEnvironment();
   const login = spawnSync(
-    NOTEBOOKLM_CLI,
-    ["-p", NOTEBOOKLM_PROFILE, "login", "--browser", "chrome"],
+    NOTEBOOKLM_PYTHON,
+    ["-m", "notebooklm", "-p", NOTEBOOKLM_PROFILE, "login", "--browser", "chrome"],
     { cwd: ROOT, env, stdio: "inherit", windowsHide: false }
   );
   if (login.status !== 0) {
@@ -175,7 +176,7 @@ export async function serveNotebookLM() {
   await ensureNotebookLMRuntime();
   const env = await notebookLMEnvironment();
   console.log(`[NotebookLM] Gateway local: ${NOTEBOOKLM_API_URL}`);
-  const child = spawn(NOTEBOOKLM_SERVER, [], {
+  const child = spawn(NOTEBOOKLM_PYTHON, ["-m", "notebooklm.server"], {
     cwd: ROOT,
     env,
     stdio: "inherit",
@@ -208,7 +209,7 @@ async function main() {
   if (command === "login") {
     await ensureNotebookLMRuntime();
     const env = await notebookLMEnvironment();
-    const result = spawnSync(NOTEBOOKLM_CLI, ["-p", NOTEBOOKLM_PROFILE, "login", "--browser", "chrome"], {
+    const result = spawnSync(NOTEBOOKLM_PYTHON, ["-m", "notebooklm", "-p", NOTEBOOKLM_PROFILE, "login", "--browser", "chrome"], {
       cwd: ROOT,
       env,
       stdio: "inherit",
