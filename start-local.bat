@@ -15,7 +15,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-if not exist "notebook-llm.zip" if not exist ".papermaxing\runtime\notebook-llm\.venv\Scripts\notebooklm-server.exe" (
+if not exist "notebook-llm.zip" if not exist ".papermaxing\runtime\notebook-llm\.venv\Scripts\python.exe" (
   echo [PaperMaxing] Falta notebook-llm.zip en esta carpeta.
   echo [PaperMaxing] Copia el ZIP que ya tienes junto a start-local.bat y vuelve a abrirlo.
   pause
@@ -32,7 +32,7 @@ if not exist node_modules (
   )
 )
 
-echo [PaperMaxing] Preparando el runtime NotebookLM incluido...
+echo [PaperMaxing] Preparando el runtime NotebookLM que ya viene en tu ZIP...
 call node server\notebooklm-runtime.mjs prepare
 if errorlevel 1 (
   pause
@@ -47,7 +47,8 @@ if errorlevel 1 (
 )
 
 echo.
-echo [PaperMaxing] Iniciando NotebookLM + API local + UI...
+echo [PaperMaxing] Iniciando API local + UI...
+echo [PaperMaxing] NotebookLM se ejecutara desde el CLI incluido cuando lo uses.
 echo [PaperMaxing] URL: http://127.0.0.1:5173
-start "" powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 4; Start-Process 'http://127.0.0.1:5173'"
-call npm run dev:notebooklm
+start "" powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 3; Start-Process 'http://127.0.0.1:5173'"
+call npm run dev
