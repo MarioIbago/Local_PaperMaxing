@@ -1,13 +1,15 @@
+import crypto from "node:crypto";
 import express from "express";
 import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { getNotebookLMToken, NOTEBOOKLM_API_URL } from "./notebooklm-runtime.mjs";
+import { runNotebookLMJson } from "./notebooklm-runtime.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
 const DATA_DIR = path.join(ROOT, ".papermaxing");
+const TMP_DIR = path.join(DATA_DIR, "tmp");
 const CONFIG_FILE = path.join(DATA_DIR, "config.json");
 const PORT = Number(process.env.PAPERMAXING_API_PORT || 8787);
 
@@ -15,9 +17,9 @@ const PROVIDERS = {
   notebooklm: {
     name: "NotebookLM",
     kind: "google-grounded",
-    description: "NotebookLM local mediante tu sesión de Google y el runtime incluido. Sin Docker ni API key.",
+    description: "NotebookLM usando el CLI local incluido y tu sesión de Google. Sin Docker, servidor Python ni API key.",
     defaultModel: "notebooklm",
-    defaultBaseUrl: NOTEBOOKLM_API_URL,
+    defaultBaseUrl: "local://notebooklm-cli",
     apiKeyMode: "none",
   },
   ollama: {
@@ -84,11 +86,7 @@ function defaultConfig() {
     providers: Object.fromEntries(
       Object.entries(PROVIDERS).map(([id, provider]) => [
         id,
-        {
-          model: provider.defaultModel,
-          baseUrl: provider.defaultBaseUrl,
-          apiKey: "",
-        },
+        { model: provider.defaultModel, baseUrl: provider.defaultBaseUrl, apiKey: "" },
       ]),
     ),
   };
@@ -120,7 +118,7 @@ async function loadConfig() {
 async function saveConfig(config) {
   await fs.mkdir(DATA_DIR, { recursive: true });
   await fs.writeFile(CONFIG_FILE, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
-  try { await fs.chmod(CONFIG_FILE, 0o600); } catch { /* Windows ignores POSIX modes. */ }
+  try { await fs.chmod(CONFIG_FILE, 0o600); } catch { /* Windows ACLs apply. */ }
 }
 
 function publicSettings(config) {
@@ -168,7 +166,7 @@ async function requestJson(url, init = {}) {
     let data = {};
     try { data = raw ? JSON.parse(raw) : {}; } catch { data = { raw }; }
     if (!response.ok) {
-      const nested = data?.detail || data?.error?.message || data?.message || data?.error || raw || `HTTP ${response.status}`;
+      const nested = data?.error?.message || data?.message || data?.error || raw || `HTTP ${response.status}`;
       throw new Error(typeof nested === "string" ? nested.slice(0, 1000) : JSON.stringify(nested).slice(0, 1000));
     }
     return data;
@@ -199,7 +197,7 @@ function chatCompletionText(data) {
 function parseGroundedPrompt(prompt) {
   const marker = "EXTRACTED PAPER TEXT:\n";
   const index = prompt.lastIndexOf(marker);
-  if (index === -1) return { question: prompt.trim(), sourceText: "", title: "PaperMaxing" };
+  if (index === -1) return { question: prompt.trim(), sourceText: "", title: "PaperMaxing paper" };
   const question = prompt.slice(0, index).trim();
   const sourceText = prompt.slice(index + marker.length).trim();
   const titleMatch = question.match(/^PAPER:\s*(.+)$/mi);
@@ -207,18 +205,20 @@ function parseGroundedPrompt(prompt) {
   return { question, sourceText, title: title.slice(0, 180) };
 }
 
-async function notebookLMRequest(pathname, init = {}) {
-  const token = await getNotebookLMToken();
-  const headers = new Headers(init.headers || {});
-  headers.set("Authorization", `Bearer ${token}`);
-  if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-  return requestJson(`${NOTEBOOKLM_API_URL}${pathname}`, { ...init, headers });
+function notebookIdFrom(raw) {
+  return raw?.notebook?.id || raw?.notebook_id || raw?.id || "";
+}
+
+function sourceIdFrom(raw) {
+  return raw?.source?.id || raw?.source_id || raw?.id || "";
 }
 
 async function runNotebookLM({ system, prompt }) {
+  let notebookId = "";
+  let promptFile = "";
   try {
     if (prompt.trim() === "Reply with exactly: PAPERMAXING_OK") {
-      await notebookLMRequest("/v1/notebooks");
+      await runNotebookLMJson(["list", "--json"], { timeoutMs: 60_000 });
       return { text: "PAPERMAXING_OK", provider: "notebooklm", providerName: "NotebookLM", model: "notebooklm" };
     }
 
@@ -227,50 +227,59 @@ async function runNotebookLM({ system, prompt }) {
       throw new Error("NotebookLM necesita el texto del paper como fuente. Carga un PDF o pega el texto antes de preguntar.");
     }
 
-    const notebook = await notebookLMRequest("/v1/notebooks", {
-      method: "POST",
-      body: JSON.stringify({ title: `PaperMaxing · ${grounded.title}` }),
-    });
-    const notebookId = notebook?.id || notebook?.notebook_id;
-    if (!notebookId) throw new Error("NotebookLM creó el notebook pero no devolvió su ID.");
+    const created = await runNotebookLMJson(
+      ["create", `PaperMaxing · ${grounded.title}`, "--json"],
+      { timeoutMs: 60_000 },
+    );
+    notebookId = notebookIdFrom(created);
+    if (!notebookId) throw new Error("NotebookLM creó el notebook temporal pero no devolvió su ID.");
 
-    try {
-      await notebookLMRequest(`/v1/notebooks/${encodeURIComponent(notebookId)}/sources/text`, {
-        method: "POST",
-        body: JSON.stringify({ text: grounded.sourceText, title: grounded.title }),
-      });
-      await notebookLMRequest(`/v1/notebooks/${encodeURIComponent(notebookId)}/sources/wait`, {
-        method: "POST",
-        body: JSON.stringify({ timeout: 110, interval: 1 }),
-      });
-      const answer = await notebookLMRequest(`/v1/notebooks/${encodeURIComponent(notebookId)}/chat`, {
-        method: "POST",
-        body: JSON.stringify({
-          question: `${system}\n\n${grounded.question}\n\nUsa únicamente las fuentes cargadas en este notebook.`,
-        }),
-      });
-      const text = typeof answer?.answer === "string" ? answer.answer.trim() : "";
-      if (!text) throw new Error("NotebookLM respondió sin texto.");
-      return {
-        text,
-        provider: "notebooklm",
-        providerName: "NotebookLM",
-        model: "notebooklm",
-        references: Array.isArray(answer?.references) ? answer.references : [],
-        conversationId: typeof answer?.conversation_id === "string" ? answer.conversation_id : undefined,
-      };
-    } finally {
-      notebookLMRequest(`/v1/notebooks/${encodeURIComponent(notebookId)}`, { method: "DELETE" }).catch(() => {});
-    }
+    const added = await runNotebookLMJson(
+      ["source", "add", "-", "--type", "text", "--title", grounded.title, "-n", notebookId, "--json"],
+      { stdin: grounded.sourceText, timeoutMs: 120_000 },
+    );
+    const sourceId = sourceIdFrom(added);
+    if (!sourceId) throw new Error("NotebookLM recibió el paper pero no devolvió el ID de la fuente.");
+
+    await runNotebookLMJson(
+      ["source", "wait", sourceId, "-n", notebookId, "--timeout", "110", "--interval", "1", "--json"],
+      { timeoutMs: 130_000 },
+    );
+
+    await fs.mkdir(TMP_DIR, { recursive: true });
+    promptFile = path.join(TMP_DIR, `notebooklm-${crypto.randomUUID()}.txt`);
+    await fs.writeFile(
+      promptFile,
+      `${system}\n\n${grounded.question}\n\nResponde usando únicamente las fuentes cargadas en este notebook. No inventes datos ni citas.`,
+      "utf8",
+    );
+
+    const answer = await runNotebookLMJson(
+      ["ask", "--prompt-file", promptFile, "-n", notebookId, "--json"],
+      { timeoutMs: 180_000 },
+    );
+    const text = typeof answer?.answer === "string" ? answer.answer.trim() : "";
+    if (!text) throw new Error("NotebookLM respondió sin texto.");
+
+    return {
+      text,
+      provider: "notebooklm",
+      providerName: "NotebookLM",
+      model: "notebooklm",
+      references: Array.isArray(answer?.references) ? answer.references : [],
+      conversationId: typeof answer?.conversation_id === "string" ? answer.conversation_id : undefined,
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (/fetch failed|ECONNREFUSED|connect/i.test(message)) {
-      throw new Error("NotebookLM local no está corriendo en 127.0.0.1:8100. Inicia PaperMaxing con start-local.bat.");
-    }
-    if (/401|auth|cookie|login|storage_state/i.test(message)) {
+    if (/auth|cookie|login|storage_state|token_fetch|authentication/i.test(message)) {
       throw new Error("La sesión de Google para NotebookLM no es válida. Ejecuta npm run notebooklm:login y vuelve a probar.");
     }
     throw error;
+  } finally {
+    if (promptFile) await fs.rm(promptFile, { force: true }).catch(() => {});
+    if (notebookId) {
+      await runNotebookLMJson(["delete", "-n", notebookId, "--yes", "--json"], { timeoutMs: 60_000 }).catch(() => {});
+    }
   }
 }
 
@@ -278,9 +287,7 @@ async function runProvider({ providerId, model, system, prompt, config }) {
   const definition = PROVIDERS[providerId];
   if (!definition) throw new Error("Proveedor desconocido.");
 
-  if (providerId === "notebooklm") {
-    return runNotebookLM({ system, prompt });
-  }
+  if (providerId === "notebooklm") return runNotebookLM({ system, prompt });
 
   const provider = config.providers[providerId];
   const selectedModel = model?.trim() || provider.model || definition.defaultModel;
@@ -425,5 +432,6 @@ try {
 
 app.listen(PORT, "127.0.0.1", () => {
   console.log(`Local PaperMaxing API: http://127.0.0.1:${PORT}`);
+  console.log("NotebookLM: CLI local incluido · sin Docker · sin servidor Python");
   console.log(`Config local: ${CONFIG_FILE}`);
 });
