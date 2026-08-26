@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -10,15 +9,11 @@ export const ROOT = path.resolve(__dirname, "..");
 export const PAPERMAXING_DIR = path.join(ROOT, ".papermaxing");
 export const NOTEBOOKLM_HOME = path.join(PAPERMAXING_DIR, "notebooklm");
 export const NOTEBOOKLM_PROFILE = "papermaxing";
-export const NOTEBOOKLM_API_URL = "http://127.0.0.1:8100";
 export const NOTEBOOKLM_ZIP = path.join(ROOT, "notebook-llm.zip");
 export const NOTEBOOKLM_RUNTIME_ROOT = path.join(PAPERMAXING_DIR, "runtime");
 export const NOTEBOOKLM_BUNDLE_ROOT = path.join(NOTEBOOKLM_RUNTIME_ROOT, "notebook-llm");
 export const NOTEBOOKLM_VENV = path.join(NOTEBOOKLM_BUNDLE_ROOT, ".venv");
-export const NOTEBOOKLM_CLI = path.join(NOTEBOOKLM_VENV, "Scripts", "notebooklm.exe");
-export const NOTEBOOKLM_SERVER = path.join(NOTEBOOKLM_VENV, "Scripts", "notebooklm-server.exe");
 export const NOTEBOOKLM_PYTHON = path.join(NOTEBOOKLM_VENV, "Scripts", "python.exe");
-const TOKEN_FILE = path.join(PAPERMAXING_DIR, "notebooklm-server-token.txt");
 
 async function exists(file) {
   try {
@@ -67,21 +62,21 @@ async function repairPortableVenv() {
 
   throw new Error(
     "El runtime incluido existe, pero su Python 3.12 no puede arrancar en este equipo. " +
-    "PaperMaxing no descargará nada automáticamente: instala/activa Python 3.12 o vuelve a generar notebook-llm.zip en este mismo equipo."
+    "PaperMaxing no descargará nada automáticamente: activa Python 3.12 o vuelve a generar notebook-llm.zip en este equipo."
   );
 }
 
 export async function ensureNotebookLMRuntime() {
   if (process.platform !== "win32") {
-    throw new Error("El notebook-llm.zip incluido es un runtime de Windows (Python 3.12 win_amd64). Usa Local PaperMaxing en Windows para este bundle.");
+    throw new Error("El notebook-llm.zip recibido contiene binarios win_amd64 de Python 3.12 y está preparado para Windows.");
   }
 
   if (!(await exists(NOTEBOOKLM_PYTHON))) {
     if (!(await exists(NOTEBOOKLM_ZIP))) {
-      throw new Error(`No encuentro ${NOTEBOOKLM_ZIP}. Copia notebook-llm.zip a la raíz de Local_PaperMaxing.`);
+      throw new Error(`No encuentro ${NOTEBOOKLM_ZIP}. Copia notebook-llm.zip junto a start-local.bat.`);
     }
     await fs.mkdir(NOTEBOOKLM_RUNTIME_ROOT, { recursive: true });
-    console.log("[NotebookLM] Extrayendo el runtime local incluido (sin descargar nada)...");
+    console.log("[NotebookLM] Extrayendo el runtime que ya tienes (sin descargar paquetes)...");
     const script = `Expand-Archive -LiteralPath ${powershellQuote(NOTEBOOKLM_ZIP)} -DestinationPath ${powershellQuote(NOTEBOOKLM_RUNTIME_ROOT)} -Force`;
     const extracted = runSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], { stdio: "inherit" });
     if (extracted.status !== 0 || !(await exists(NOTEBOOKLM_PYTHON))) {
@@ -90,50 +85,108 @@ export async function ensureNotebookLMRuntime() {
   }
 
   await repairPortableVenv();
-  return {
-    cli: NOTEBOOKLM_CLI,
-    server: NOTEBOOKLM_SERVER,
-    python: NOTEBOOKLM_PYTHON,
-    home: NOTEBOOKLM_HOME,
-    profile: NOTEBOOKLM_PROFILE,
-  };
-}
-
-export async function getNotebookLMToken() {
-  await fs.mkdir(PAPERMAXING_DIR, { recursive: true });
-  try {
-    const token = (await fs.readFile(TOKEN_FILE, "utf8")).trim();
-    if (token) return token;
-  } catch {
-    // Create it below.
-  }
-  const token = crypto.randomBytes(32).toString("hex");
-  await fs.writeFile(TOKEN_FILE, `${token}\n`, { mode: 0o600 });
-  try { await fs.chmod(TOKEN_FILE, 0o600); } catch { /* Windows ACLs apply. */ }
-  return token;
+  return { python: NOTEBOOKLM_PYTHON, home: NOTEBOOKLM_HOME, profile: NOTEBOOKLM_PROFILE };
 }
 
 export async function notebookLMEnvironment() {
-  const token = await getNotebookLMToken();
   await fs.mkdir(NOTEBOOKLM_HOME, { recursive: true });
   return {
     ...process.env,
     NOTEBOOKLM_HOME,
     NOTEBOOKLM_PROFILE,
-    NOTEBOOKLM_SERVER_HOST: "127.0.0.1",
-    NOTEBOOKLM_SERVER_PORT: "8100",
-    NOTEBOOKLM_SERVER_TOKEN: token,
+    PYTHONUTF8: "1",
+    PYTHONIOENCODING: "utf-8",
   };
 }
 
-async function authCheck({ quiet = false } = {}) {
+function parseJsonFromStdout(stdout) {
+  const text = String(stdout || "").trim();
+  if (!text) throw new Error("NotebookLM no devolvió JSON.");
+  try {
+    return JSON.parse(text);
+  } catch {
+    const first = text.indexOf("{");
+    const last = text.lastIndexOf("}");
+    if (first >= 0 && last > first) {
+      try { return JSON.parse(text.slice(first, last + 1)); } catch { /* handled below */ }
+    }
+    throw new Error(`No se pudo interpretar la salida JSON de NotebookLM: ${text.slice(0, 500)}`);
+  }
+}
+
+export async function runNotebookLMCommand(args, { stdin = "", timeoutMs = 180_000, inherit = false } = {}) {
   await ensureNotebookLMRuntime();
   const env = await notebookLMEnvironment();
-  const result = runSync(NOTEBOOKLM_PYTHON, ["-m", "notebooklm", "-p", NOTEBOOKLM_PROFILE, "auth", "check", "--test", "--json"], {
-    env,
-    stdio: quiet ? "pipe" : "inherit",
+
+  if (inherit) {
+    const result = spawnSync(NOTEBOOKLM_PYTHON, ["-m", "notebooklm", "-p", NOTEBOOKLM_PROFILE, ...args], {
+      cwd: ROOT,
+      env,
+      input: stdin || undefined,
+      stdio: stdin ? ["pipe", "inherit", "inherit"] : "inherit",
+      windowsHide: false,
+      timeout: timeoutMs,
+    });
+    if (result.status !== 0) throw new Error(`NotebookLM terminó con código ${result.status ?? "desconocido"}.`);
+    return { stdout: "", stderr: "" };
+  }
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(NOTEBOOKLM_PYTHON, ["-m", "notebooklm", "-p", NOTEBOOKLM_PROFILE, ...args], {
+      cwd: ROOT,
+      env,
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      child.kill();
+      settled = true;
+      reject(new Error(`NotebookLM tardó más de ${Math.round(timeoutMs / 1000)} segundos.`));
+    }, timeoutMs);
+
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code === 0) return resolve({ stdout, stderr });
+      const detail = (stderr || stdout || `exit ${code}`).trim().slice(-1200);
+      reject(new Error(detail));
+    });
+    if (stdin) child.stdin.write(stdin);
+    child.stdin.end();
   });
-  return result.status === 0;
+}
+
+export async function runNotebookLMJson(args, options = {}) {
+  const result = await runNotebookLMCommand(args, options);
+  return parseJsonFromStdout(result.stdout);
+}
+
+async function authCheck({ quiet = false } = {}) {
+  try {
+    if (quiet) {
+      const result = await runNotebookLMJson(["auth", "check", "--test", "--json"], { timeoutMs: 45_000 });
+      return result?.status === "ok" && result?.checks?.token_fetch === true;
+    }
+    await runNotebookLMCommand(["auth", "check", "--test", "--json"], { inherit: true, timeoutMs: 45_000 });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function ensureNotebookLMAuth({ interactive = true } = {}) {
@@ -141,62 +194,17 @@ export async function ensureNotebookLMAuth({ interactive = true } = {}) {
   if (!interactive) return false;
 
   console.log("\n[NotebookLM] Falta iniciar sesión o la sesión expiró.");
-  console.log("[NotebookLM] Abriré Google en tu Chrome instalado. No se descargará Chromium.\n");
-  const env = await notebookLMEnvironment();
-  const login = spawnSync(
-    NOTEBOOKLM_PYTHON,
-    ["-m", "notebooklm", "-p", NOTEBOOKLM_PROFILE, "login", "--browser", "chrome"],
-    { cwd: ROOT, env, stdio: "inherit", windowsHide: false }
-  );
-  if (login.status !== 0) {
-    throw new Error("El inicio de sesión de NotebookLM no terminó correctamente.");
-  }
+  console.log("[NotebookLM] Abriré tu Chrome instalado. No se descargará Chromium ni paquetes.\n");
+  await runNotebookLMCommand(["login", "--browser", "chrome"], { inherit: true, timeoutMs: 10 * 60_000 });
   if (!(await authCheck({ quiet: true }))) {
-    throw new Error("Google abrió, pero NotebookLM todavía no puede validar la sesión.");
+    throw new Error("El login terminó, pero Google todavía no valida la sesión de NotebookLM.");
   }
   console.log("[NotebookLM] Sesión validada.\n");
   return true;
 }
 
 export async function probeNotebookLM() {
-  const token = await getNotebookLMToken();
-  const health = await fetch(`${NOTEBOOKLM_API_URL}/healthz`);
-  if (!health.ok) throw new Error(`NotebookLM health respondió HTTP ${health.status}.`);
-  const notebooks = await fetch(`${NOTEBOOKLM_API_URL}/v1/notebooks`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!notebooks.ok) {
-    const detail = await notebooks.text();
-    throw new Error(`NotebookLM auth respondió HTTP ${notebooks.status}: ${detail.slice(0, 400)}`);
-  }
-  return true;
-}
-
-export async function serveNotebookLM() {
-  await ensureNotebookLMRuntime();
-  const env = await notebookLMEnvironment();
-  console.log(`[NotebookLM] Gateway local: ${NOTEBOOKLM_API_URL}`);
-  const child = spawn(NOTEBOOKLM_PYTHON, ["-m", "notebooklm.server"], {
-    cwd: ROOT,
-    env,
-    stdio: "inherit",
-    windowsHide: false,
-  });
-
-  for (const signal of ["SIGINT", "SIGTERM"]) {
-    process.on(signal, () => {
-      if (!child.killed) child.kill(signal);
-    });
-  }
-
-  return new Promise((resolve, reject) => {
-    child.on("error", reject);
-    child.on("exit", (code, signal) => {
-      if (signal) return resolve();
-      if (code === 0) return resolve();
-      reject(new Error(`notebooklm-server terminó con código ${code}.`));
-    });
-  });
+  return runNotebookLMJson(["list", "--json"], { timeoutMs: 60_000 });
 }
 
 async function main() {
@@ -208,14 +216,7 @@ async function main() {
   }
   if (command === "login") {
     await ensureNotebookLMRuntime();
-    const env = await notebookLMEnvironment();
-    const result = spawnSync(NOTEBOOKLM_PYTHON, ["-m", "notebooklm", "-p", NOTEBOOKLM_PROFILE, "login", "--browser", "chrome"], {
-      cwd: ROOT,
-      env,
-      stdio: "inherit",
-      windowsHide: false,
-    });
-    process.exitCode = result.status ?? 1;
+    await runNotebookLMCommand(["login", "--browser", "chrome"], { inherit: true, timeoutMs: 10 * 60_000 });
     return;
   }
   if (command === "ensure-auth") {
@@ -226,13 +227,10 @@ async function main() {
     process.exitCode = (await authCheck({ quiet: false })) ? 0 : 1;
     return;
   }
-  if (command === "serve") {
-    await serveNotebookLM();
-    return;
-  }
   if (command === "probe") {
-    await probeNotebookLM();
-    console.log("[NotebookLM] Gateway y sesión OK.");
+    const result = await probeNotebookLM();
+    const count = Array.isArray(result?.notebooks) ? result.notebooks.length : 0;
+    console.log(`[NotebookLM] Sesión OK · ${count} notebook(s) visibles.`);
     return;
   }
   throw new Error(`Comando desconocido: ${command}`);
